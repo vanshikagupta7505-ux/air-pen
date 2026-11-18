@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Air Pen – Wall Mode</title>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#000;color:#fff;font-family:"Trebuchet MS",system-ui,sans-serif}
+#bg{position:fixed;inset:0;background:#000}
+body.cal #bg{background:#fff}
+#ink{position:fixed;inset:0;width:100%;height:100%}
+body.cal #ink{display:none}
+#pv{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:min(70vw,calc(70vh * var(--ar,1.333)));aspect-ratio:var(--ar,1.333);border:3px solid #e4572e;cursor:crosshair;background:#222}
+#pv video{width:100%;height:100%;display:block}
+body.run #pv{opacity:0;pointer-events:none;z-index:-1}
+.dot{position:absolute;width:18px;height:18px;margin:-9px 0 0 -9px;border-radius:50%;background:#e4572e;color:#fff;font-size:12px;text-align:center;line-height:18px;pointer-events:none}
+#msg{position:fixed;top:calc(12px + env(safe-area-inset-top,0px));left:12px;right:12px;text-align:center;font-size:17px;color:#111;font-weight:bold}
+body.run #msg{display:none}
+#bar{position:fixed;bottom:calc(12px + env(safe-area-inset-bottom,0px));left:0;right:0;display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
+#bar.hide{display:none}
+button,input[type=color]{font:inherit;font-size:15px;border:0;border-radius:999px;background:#2a2522;color:#f4efe9;padding:10px 16px;cursor:pointer;box-shadow:0 0 0 1px #6b625b}
+button.on{background:#ffb347;color:#14110f}
+button:disabled{opacity:.4;cursor:default}
+input[type=color]{width:46px;height:40px;padding:4px}
+</style>
+</head>
+<body class="cal">
+<div id="bg"></div>
+<canvas id="ink"></canvas>
+<div id="pv"><video id="v" playsinline muted></video></div>
+<div id="msg"></div>
+<div id="bar">
+  <button id="calb">Calibrate</button>
+  <button id="start" disabled>Start ▶</button>
+  <button id="erase">Eraser 🧽</button>
+  <input type="color" id="col" value="#7df9ff" aria-label="Pen color">
+  <button id="clear">Clear</button>
+  <button id="flip">Flip 🔄</button>
+  <button id="full">Fullscreen</button>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const v=$('v'),ink=$('ink'),ctx=ink.getContext('2d'),msg=$('msg'),pv=$('pv'),bar=$('bar');
+let facing='environment',stream=null,running=false,mode='cal';
+let pts=[],H=null,last=null,sm=null,eraserMode=false,color='#7df9ff';
+
+/* ---------- canvas size ---------- */
+function fit(){
+  const old=document.createElement('canvas');old.width=ink.width;old.height=ink.height;
+  if(ink.width)old.getContext('2d').drawImage(ink,0,0);
+  ink.width=innerWidth;ink.height=innerHeight;
+  if(old.width)ctx.drawImage(old,0,0,ink.width,ink.height);
+  ctx.lineCap='round';ctx.lineJoin='round';
+}
+addEventListener('resize',fit);fit();
+
+/* ---------- homography (camera 0..1 -> projector 0..1) ---------- */
+function solveH(src){
+  const dst=[[0,0],[1,0],[1,1],[0,1]],A=[];
+  for(let i=0;i<4;i++){
+    const [x,y]=src[i],[u,w]=dst[i];
+    A.push([x,y,1,0,0,0,-x*u,-y*u,u]);
+    A.push([0,0,0,x,y,1,-x*w,-y*w,w]);
+  }
+  for(let c=0;c<8;c++){
+    let p=c;for(let r=c+1;r<8;r++)if(Math.abs(A[r][c])>Math.abs(A[p][c]))p=r;
+    [A[c],A[p]]=[A[p],A[c]];
+    if(Math.abs(A[c][c])<1e-9)return null;
+    for(let r=0;r<8;r++){if(r===c)continue;const f=A[r][c]/A[c][c];for(let k=c;k<9;k++)A[r][k]-=f*A[c][k];}
+  }
+  return A.map((r,i)=>r[8]/r[i]);
+}
+function map(x,y){
+  const h=H,d=h[6]*x+h[7]*y+1;
+  return [(h[0]*x+h[1]*y+h[2])/d,(h[3]*x+h[4]*y+h[5])/d];
+}
+
+/* ---------- calibration ---------- */
+const prompts=['1/4: projected safed area ka UPAR-LEFT corner tap karo','2/4: UPAR-RIGHT corner tap karo','3/4: NEECHE-RIGHT corner tap karo','4/4: NEECHE-LEFT corner tap karo'];
+function drawDots(){
+  pv.querySelectorAll('.dot').forEach(d=>d.remove());
+  pts.forEach((p,i)=>{const d=document.createElement('div');d.className='dot';d.textContent=i+1;d.style.left=p[0]*100+'%';d.style.top=p[1]*100+'%';pv.appendChild(d);});
+}
+function applyPts(){
+  drawDots();
+  if(pts.length<4){msg.textContent=prompts[pts.length];$('start').disabled=true;H=null;return;}
+  H=solveH(pts);
+  if(!H){pts=[];drawDots();msg.textContent='Corners galat lage. Dobara 4 corners tap karo.';return;}
+  $('start').disabled=false;
+  msg.textContent='Calibration ho gayi ✔ Ab "Start" dabao.';
+  try{localStorage.setItem('airpen-wall',JSON.stringify(pts));}catch(e){}
+}
+pv.addEventListener('click',e=>{
+  if(mode!=='cal'||pts.length>=4)return;
+  const r=pv.getBoundingClientRect();
+  pts.push([(e.clientX-r.left)/r.width,(e.clientY-r.top)/r.height]);
+  applyPts();
+});
+$('calb').onclick=()=>{setMode('cal');pts=[];H=null;applyPts();};
+function setMode(m){mode=m;document.body.className=m;bar.classList.remove('hide');last=null;sm=null;}
+$('start').onclick=()=>{setMode('run');bar.classList.add('hide');};
+document.addEventListener('click',e=>{if(mode==='run'&&!bar.contains(e.target))bar.classList.toggle('hide');});
+addEventListener('keydown',e=>{if(e.key==='Escape'||e.key==='h')bar.classList.toggle('hide');});
+
+/* ---------- camera ---------- */
+async function startCam(){
+  try{
+    if(stream)stream.getTracks().forEach(t=>t.stop());
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:facing,width:{ideal:1280},height:{ideal:720}},audio:false});
+    v.srcObject=stream;await v.play();
+    pv.style.setProperty('--ar',v.videoWidth/v.videoHeight);
+    if(!running){running=true;loop();}
+  }catch(e){msg.textContent='Camera nahi mila. Permission allow karo (HTTPS zaroori hai).';}
+}
+$('flip').onclick=()=>{facing=facing==='user'?'environment':'user';startCam();$('calb').click();};
+async function loop(){
+  if(v.readyState>=2){try{await hands.send({image:v});}catch(e){}}
+  requestAnimationFrame(loop);
+}
+
+/* ---------- hand tracking ---------- */
+const hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}`});
+hands.setOptions({maxNumHands:1,modelComplexity:1,minDetectionConfidence:0.6,minTrackingConfidence:0.5});
+hands.onResults(onResults);
+const penDown=l=>l[8].y<l[6].y&&l[12].y>l[10].y&&l[16].y>l[14].y&&l[20].y>l[18].y;
+const twoFingers=l=>l[8].y<l[6].y&&l[12].y<l[10].y&&l[16].y>l[14].y&&l[20].y>l[18].y;
+
+function onResults(r){
+  if(mode!=='run'||!H)return;
+  const l=r.multiHandLandmarks&&r.multiHandLandmarks[0];
+  if(!l){last=null;sm=null;return;}
+  const two=twoFingers(l),erasing=two||(eraserMode&&penDown(l));
+  if(!erasing&&!penDown(l)){last=null;sm=null;return;}
+  const cx=two?(l[8].x+l[12].x)/2:l[8].x,cy=two?(l[8].y+l[12].y)/2:l[8].y;
+  const [u,w]=map(cx,cy);
+  if(u<-0.05||u>1.05||w<-0.05||w>1.05){last=null;sm=null;return;}
+  const x=u*ink.width,y=w*ink.height;
+  sm=sm?{x:sm.x*0.6+x*0.4,y:sm.y*0.6+y*0.4}:{x,y};
+  ctx.save();
+  if(erasing){ctx.globalCompositeOperation='destination-out';ctx.lineWidth=Math.max(40,ink.width/12);ctx.shadowBlur=0;}
+  else{ctx.strokeStyle=color;ctx.shadowColor=color;ctx.shadowBlur=12;ctx.lineWidth=Math.max(5,ink.width/200);}
+  ctx.beginPath();
+  if(last){ctx.moveTo(last.x,last.y);ctx.lineTo(sm.x,sm.y);}else{ctx.moveTo(sm.x,sm.y);ctx.lineTo(sm.x+0.1,sm.y);}
+  ctx.stroke();ctx.restore();last={...sm};
+}
+
+/* ---------- buttons ---------- */
+$('erase').onclick=e=>{eraserMode=!eraserMode;e.currentTarget.classList.toggle('on',eraserMode);last=null;sm=null;};
+$('clear').onclick=()=>{ctx.clearRect(0,0,ink.width,ink.height);last=null;};
+$('col').oninput=e=>{color=e.target.value;};
+$('full').onclick=()=>{document.fullscreenElement?document.exitFullscreen():document.documentElement.requestFullscreen();};
+
+/* ---------- init ---------- */
+try{
+  const s=JSON.parse(localStorage.getItem('airpen-wall')||'null');
+  if(Array.isArray(s)&&s.length===4){pts=s;applyPts();msg.textContent='Purani calibration mili. Camera/projector hila ho to "Calibrate" dobara karo, warna Start dabao.';}
+  else applyPts();
+}catch(e){applyPts();}
+startCam();
+</script>
+</body>
+</html>

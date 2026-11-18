@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Air Pen – Phone ✍️</title>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+<style>
+html,body{margin:0;height:100%;background:#000;color:#fff;font-family:"Trebuchet MS",system-ui,sans-serif;overflow:hidden}
+#stage{position:fixed;inset:0 0 124px 0;display:flex;align-items:center;justify-content:center}
+#out{max-width:100%;max-height:100%;width:auto;height:auto;background:#111}
+#msg{position:fixed;top:calc(10px + env(safe-area-inset-top,0px));left:10px;right:10px;text-align:center;font-size:14px;text-shadow:0 1px 6px #000;pointer-events:none}
+#bar{position:fixed;bottom:0;left:0;right:0;padding:8px 8px calc(8px + env(safe-area-inset-bottom,0px));display:flex;gap:8px;justify-content:center;flex-wrap:wrap;background:#0b0b0b}
+button,input[type=color]{font:inherit;font-size:15px;border:0;border-radius:999px;background:#2a2522;color:#f4efe9;padding:10px 14px;cursor:pointer}
+button.on{background:#ffb347;color:#14110f}
+button#rec.on{background:#e63946;color:#fff}
+input[type=color]{width:46px;height:40px;padding:4px}
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="out"></canvas></div>
+<div id="msg">Camera allow karo, wall ki taraf rakho, phir ek ungli upar karke likho ✍️</div>
+<div id="bar">
+  <button id="rec">Record 🔴</button>
+  <button id="save">Photo 📷</button>
+  <button id="flip">Flip 🔄</button>
+  <button id="torch">Torch 🔦</button>
+  <button id="dim">Dim 🌙</button>
+  <button id="erase">Eraser 🧽</button>
+  <input type="color" id="col" value="#7df9ff" aria-label="Pen color">
+  <button id="clear">Clear</button>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const v=document.createElement('video');v.playsInline=true;v.muted=true;
+const out=$('out'),octx=out.getContext('2d'),msg=$('msg');
+const ink=document.createElement('canvas'),ictx=ink.getContext('2d');
+let facing='environment',stream=null,running=false,dim=false,torchOn=false;
+let last=null,sm=null,color='#7df9ff',eraserMode=false,mr=null,chunks=[];
+const say=t=>{msg.textContent=t};
+
+async function startCam(){
+  try{
+    if(stream)stream.getTracks().forEach(t=>t.stop());
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:facing,width:{ideal:1280},height:{ideal:720}},audio:false});
+    v.srcObject=stream;await v.play();
+    if(ink.width!==v.videoWidth||ink.height!==v.videoHeight){
+      ink.width=out.width=v.videoWidth;ink.height=out.height=v.videoHeight;
+    }
+    ictx.lineCap='round';ictx.lineJoin='round';
+    last=null;sm=null;torchOn=false;$('torch').classList.remove('on');
+    say('Ek ungli (index finger) wall ke saamne upar karke likho ✍️');
+    if(!running){running=true;draw();track();}
+  }catch(e){say('Camera nahi mila. Browser me camera permission allow karo (HTTPS zaroori hai).');}
+}
+
+function draw(){
+  if(v.readyState>=2&&ink.width){
+    octx.save();
+    if(facing==='user'){octx.translate(out.width,0);octx.scale(-1,1);}
+    octx.drawImage(v,0,0,out.width,out.height);
+    if(dim){octx.fillStyle='rgba(0,0,0,.5)';octx.fillRect(0,0,out.width,out.height);}
+    octx.drawImage(ink,0,0);
+    octx.restore();
+  }
+  requestAnimationFrame(draw);
+}
+async function track(){
+  if(v.readyState>=2){try{await hands.send({image:v});}catch(e){}}
+  requestAnimationFrame(track);
+}
+
+const hands=new Hands({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}`});
+hands.setOptions({maxNumHands:1,modelComplexity:1,minDetectionConfidence:0.6,minTrackingConfidence:0.5});
+hands.onResults(onResults);
+const penDown=l=>l[8].y<l[6].y&&l[12].y>l[10].y&&l[16].y>l[14].y&&l[20].y>l[18].y;
+const twoFingers=l=>l[8].y<l[6].y&&l[12].y<l[10].y&&l[16].y>l[14].y&&l[20].y>l[18].y;
+
+function onResults(r){
+  const l=r.multiHandLandmarks&&r.multiHandLandmarks[0];
+  if(!l){last=null;sm=null;return;}
+  const two=twoFingers(l),erasing=two||(eraserMode&&penDown(l));
+  if(!erasing&&!penDown(l)){last=null;sm=null;return;}
+  const nx=two?(l[8].x+l[12].x)/2:l[8].x,ny=two?(l[8].y+l[12].y)/2:l[8].y;
+  const x=nx*ink.width,y=ny*ink.height;
+  sm=sm?{x:sm.x*0.6+x*0.4,y:sm.y*0.6+y*0.4}:{x,y};
+  ictx.save();
+  if(erasing){ictx.globalCompositeOperation='destination-out';ictx.lineWidth=Math.max(30,ink.width/12);ictx.shadowBlur=0;}
+  else{ictx.strokeStyle=color;ictx.shadowColor=color;ictx.shadowBlur=14;ictx.lineWidth=Math.max(5,ink.width/110);}
+  ictx.beginPath();
+  if(last){ictx.moveTo(last.x,last.y);ictx.lineTo(sm.x,sm.y);}else{ictx.moveTo(sm.x,sm.y);ictx.lineTo(sm.x+0.1,sm.y);}
+  ictx.stroke();ictx.restore();last={...sm};
+}
+
+$('flip').onclick=()=>{facing=facing==='user'?'environment':'user';startCam();};
+$('clear').onclick=()=>{ictx.clearRect(0,0,ink.width,ink.height);last=null;};
+$('col').oninput=e=>{color=e.target.value;};
+$('dim').onclick=e=>{dim=!dim;e.currentTarget.classList.toggle('on',dim);};
+$('erase').onclick=e=>{eraserMode=!eraserMode;e.currentTarget.classList.toggle('on',eraserMode);last=null;sm=null;say(eraserMode?'Eraser on: ek ungli ya peace sign ✌️ se mitao':'Ek ungli se likho, peace sign ✌️ se mitao');};
+$('torch').onclick=async e=>{
+  const t=stream&&stream.getVideoTracks()[0],caps=t&&t.getCapabilities?t.getCapabilities():{};
+  if(!caps.torch){say('Is camera me torch support nahi hai (back camera try karo).');return;}
+  torchOn=!torchOn;
+  try{await t.applyConstraints({advanced:[{torch:torchOn}]});e.currentTarget.classList.toggle('on',torchOn);}catch(err){say('Torch on nahi ho paya.');}
+};
+$('save').onclick=()=>{const a=document.createElement('a');a.download='air-pen.png';a.href=out.toDataURL('image/png');a.click();};
+$('rec').onclick=e=>{
+  if(mr&&mr.state==='recording'){mr.stop();return;}
+  if(!window.MediaRecorder||!out.captureStream){say('Is browser me recording nahi hai. Phone ka screen recorder use karo.');return;}
+  const t=['video/mp4','video/webm;codecs=vp9','video/webm'].find(x=>MediaRecorder.isTypeSupported(x))||'';
+  mr=new MediaRecorder(out.captureStream(30),t?{mimeType:t}:{});
+  chunks=[];
+  mr.ondataavailable=ev=>{if(ev.data.size)chunks.push(ev.data);};
+  mr.onstop=()=>{
+    const b=new Blob(chunks,{type:mr.mimeType}),a=document.createElement('a');
+    a.href=URL.createObjectURL(b);a.download='air-pen.'+(mr.mimeType.includes('mp4')?'mp4':'webm');a.click();
+    $('rec').classList.remove('on');$('rec').textContent='Record 🔴';say('Video save ho gaya ✔');
+  };
+  mr.start();e.currentTarget.classList.add('on');e.currentTarget.textContent='Stop ⏹';say('Recording chal rahi hai...');
+};
+startCam();
+</script>
+</body>
+</html>
